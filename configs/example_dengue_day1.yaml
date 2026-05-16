@@ -1,0 +1,40 @@
+project:
+  name: dengue_day1
+  output_dir: outputs/scapaview
+
+reference:
+  gtf: /path/to/gencode.v44.annotation.gtf
+  gene_info: /path/to/geneInfo.tab
+
+scpolaseq:
+  site_catalog: /path/to/apa/site_catalog.tsv
+  pas_reference: /path/to/pas_reference/pas_reference.tsv
+  pdui_matrix: /path/to/apa_calls/pdui_usage_matrix.tsv
+  apa_events: /path/to/apa_calls/apa_events.tsv
+
+sierra:
+  quant_dir: /path/to/sierra_quant/cluster
+
+scapture:
+  site_catalog: /path/to/scapture.site_catalog.tsv
+  umi_matrix: /path/to/KeepCell.UMIs.tsv
+
+cell_labels:
+  apa_ready_groups: /path/to/apa_ready_groups.tsv
+
+bigwig_tracks:
+  DF:
+    all: /path/to/DF.bw
+    CD14_Monocyte: /path/to/DF.CD14_Monocyte.bw
+  DHF:
+    all: /path/to/DHF.bw
+    CD14_Monocyte: /path/to/DHF.CD14_Monocyte.bw
+
+analysis:
+  group_a: DF
+  group_b: DHF
+  fdr_cutoff: 0.05
+  delta_pdui_cutoff: 0.15
+  pas_match_window: 25
+  splice_proximal_window: 100
+  n_bins_metagene: 100

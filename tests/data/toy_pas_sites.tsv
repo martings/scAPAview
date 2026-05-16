@@ -1,0 +1,9 @@
+site_id	gene_id	chrom	start	end	strand	source
+GENE1_site1	GENE1	chr1	4800	4801	+	sierra
+GENE1_site2	GENE1	chr1	4900	4901	+	scapture
+GENE1_site3	GENE1	chr1	4950	4951	+	sierra
+GENE1_site4	GENE1	chr1	4960	4961	+	scapture
+GENE2_site1	GENE2	chr1	7050	7051	-	sierra
+GENE2_site2	GENE2	chr1	7100	7101	-	scapture
+GENE2_site3	GENE2	chr1	7200	7201	-	sierra
+GENE2_site4	GENE2	chr1	7210	7211	-	scapture

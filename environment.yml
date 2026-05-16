@@ -1,0 +1,22 @@
+name: scapaview
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python>=3.10
+  - pandas
+  - numpy
+  - scipy
+  - matplotlib
+  - seaborn
+  - pyranges
+  - anndata
+  - pyyaml
+  - click
+  - pytest
+  - jupyterlab
+  - pip
+  - pip:
+    - pyBigWig
+    - -e .
