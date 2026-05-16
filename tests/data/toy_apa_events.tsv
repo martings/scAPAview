@@ -1,0 +1,7 @@
+gene_id	site_id	group_a	group_b	pdui_a	pdui_b	delta_pdui	p_value	adj_p_value
+GENE1	GENE1_site1	DF	DHF	0.7	0.4	-0.3	0.001	0.003
+GENE1	GENE1_site2	DF	DHF	0.5	0.8	0.3	0.002	0.006
+GENE1	GENE1_site3	DF	DHF	0.6	0.65	0.05	0.3	0.6
+GENE2	GENE2_site1	DF	DHF	0.3	0.7	0.4	0.0001	0.0003
+GENE2	GENE2_site2	DF	DHF	0.9	0.75	-0.15	0.04	0.04
+GENE2	GENE2_site3	DF	DHF	0.5	0.55	0.05	0.5	0.9

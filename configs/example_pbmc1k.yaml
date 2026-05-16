@@ -1,0 +1,33 @@
+project:
+  name: pbmc1k
+  output_dir: outputs/scapaview
+
+reference:
+  gtf: /path/to/gencode.v44.annotation.gtf
+  gene_info: /path/to/geneInfo.tab
+
+scpolaseq:
+  site_catalog: /path/to/apa/site_catalog.tsv
+  pas_reference: /path/to/pas_reference/pas_reference.tsv
+  pdui_matrix: /path/to/apa_calls/pdui_usage_matrix.tsv
+  apa_events: /path/to/apa_calls/apa_events.tsv
+
+cell_labels:
+  apa_ready_groups: /path/to/apa_ready_groups.tsv
+
+bigwig_tracks:
+  B_cell:
+    all: /path/to/B_cell.bw
+  T_cell:
+    all: /path/to/T_cell.bw
+  CD14_Monocyte:
+    all: /path/to/CD14_Monocyte.bw
+
+analysis:
+  group_a: B_cell
+  group_b: T_cell
+  fdr_cutoff: 0.05
+  delta_pdui_cutoff: 0.15
+  pas_match_window: 25
+  splice_proximal_window: 100
+  n_bins_metagene: 100

@@ -1,0 +1,6 @@
+gene_sets:
+  TestSet1:
+    - GENE1
+    - GENE2
+  TestSet2:
+    - GENE3
