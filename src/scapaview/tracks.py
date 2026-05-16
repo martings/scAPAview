@@ -166,7 +166,7 @@ def plot_gene_apa_tracks(
         # Try to join pas position to apa events
         if "start" in pas_sub.columns and "site_id" in apa_sub.columns and "site_id" in pas_sub.columns:
             apa_with_pos = apa_sub.merge(
-                pas_sub[["site_id", "start"]].rename(columns={"start": "start"}),
+                pas_sub[["site_id", "start"]],
                 on="site_id", how="left",
             )
             draw_apa_lollipops(ax_pas, apa_with_pos, y_level=0.2)

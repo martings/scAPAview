@@ -112,8 +112,7 @@ def read_bed(path: str | Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"BED file not found: {path}")
     col_names = ["chrom", "start", "end", "name", "score", "strand"]
-    df = pd.read_csv(path, sep="\t", header=None, names=col_names[: None])
-    # Trim to columns actually present
+    df = pd.read_csv(path, sep="\t", header=None)
     df.columns = col_names[: len(df.columns)]
     logger.info("Loaded %d BED records from %s", len(df), path)
     return df
