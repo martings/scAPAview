@@ -9,15 +9,54 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from .plotting import (
-    draw_coverage,
-    draw_gene_model,
-    draw_pas_sites,
-    draw_apa_lollipops,
-    save_figure,
-)
+from .coverage import extract_bigwig_interval, select_strand_bigwig
+from .io import gene_id_base
+from .plotting import draw_apa_lollipops, draw_coverage, draw_gene_model, draw_pas_sites, save_figure
 
 logger = logging.getLogger(__name__)
+
+
+def _feature_col(gtf: pd.DataFrame) -> str:
+    return "Feature" if "Feature" in gtf.columns else "feature"
+
+
+def _find_gene(gtf: pd.DataFrame, gene_name: str) -> pd.Series:
+    feature_col = _feature_col(gtf)
+    genes = gtf[gtf[feature_col].astype(str).str.lower() == "gene"].copy()
+    if genes.empty:
+        return pd.Series(dtype=object)
+    masks = []
+    if "gene_name" in genes.columns:
+        masks.append(genes["gene_name"].astype(str) == gene_name)
+    if "gene_id" in genes.columns:
+        masks.append(genes["gene_id"].astype(str) == gene_name)
+        masks.append(genes["gene_id"].map(gene_id_base) == gene_id_base(gene_name))
+    if "gene_id_base" in genes.columns:
+        masks.append(genes["gene_id_base"].astype(str) == gene_id_base(gene_name))
+    for mask in masks:
+        hit = genes[mask]
+        if not hit.empty:
+            return hit.iloc[0]
+    return pd.Series(dtype=object)
+
+
+def _subset_by_gene(df: pd.DataFrame, gene_row: pd.Series) -> pd.DataFrame:
+    if df is None or df.empty or gene_row.empty:
+        return pd.DataFrame()
+    gid = gene_row.get("gene_id")
+    gid_base = gene_row.get("gene_id_base", gene_id_base(gid))
+    if "gene_id_base" in df.columns:
+        return df[df["gene_id_base"].astype(str) == str(gid_base)]
+    if "gene_id" in df.columns:
+        return df[df["gene_id"].map(gene_id_base) == str(gid_base)]
+    return pd.DataFrame()
+
+
+def _save_png_pdf(fig: plt.Figure, output: str | Path) -> None:
+    output = Path(output)
+    save_figure(fig, output)
+    if output.suffix.lower() != ".pdf":
+        save_figure(fig, output.with_suffix(".pdf"))
 
 
 def plot_gene_apa_tracks(
@@ -33,159 +72,97 @@ def plot_gene_apa_tracks(
     output: str | Path | None = None,
     show: bool = True,
 ) -> tuple[plt.Figure, list[plt.Axes]]:
-    """Plot gene-level APA tracks.
-
-    Panels (from top to bottom):
-    1. Coverage tracks (one per bigwig group, or empty placeholder)
-    2. Gene model with exons and intron backbone
-    3. PAS site marks coloured by source
-    4. APA event lollipops coloured by ΔPDUI
-
-    Parameters
-    ----------
-    gene_name     : HGNC symbol or gene_id to look up
-    gtf           : standardised GTF DataFrame (0-based)
-    pas_sites     : PAS sites DataFrame
-    apa_events    : APA events DataFrame (optional)
-    bigwig_tracks : dict mapping label → bw_path (or dict with group/celltype keys)
-    group_a/b     : group labels for display
-    celltype      : restrict to a specific cell type bigwig
-    flank         : bp to extend left/right of gene
-    output        : path to save figure (PNG/PDF)
-    show          : call plt.show() if True
-
-    Returns
-    -------
-    (fig, axes) tuple
-    """
-    # Identify gene in GTF
-    gene_name_col = "gene_name" if "gene_name" in gtf.columns else None
-    gene_id_col = "gene_id" if "gene_id" in gtf.columns else "GeneID"
-    feature_col = "Feature" if "Feature" in gtf.columns else "feature"
-
-    gene_mask = (gtf[feature_col].str.lower() == "gene") & (
-        (gtf.get(gene_name_col, pd.Series(dtype=str)) == gene_name)
-        if gene_name_col
-        else (gtf[gene_id_col] == gene_name)
-    )
-    gene_rows = gtf[gene_mask]
-    if gene_rows.empty:
-        gene_rows = gtf[gtf[gene_id_col] == gene_name]
-    if gene_rows.empty:
-        logger.warning("Gene '%s' not found in GTF; producing empty plot.", gene_name)
-
-    gene_row = gene_rows.iloc[0] if not gene_rows.empty else pd.Series(dtype=object)
-
+    """Plot coverage, gene model, PAS sites, and delta-PDUI events for one gene."""
+    gene_row = _find_gene(gtf, gene_name)
     start_col = "Start" if "Start" in gtf.columns else "start"
     end_col = "End" if "End" in gtf.columns else "end"
     strand_col = "Strand" if "Strand" in gtf.columns else "strand"
     chrom_col = "Chromosome" if "Chromosome" in gtf.columns else "chrom"
+    feature_col = _feature_col(gtf)
 
-    # Gene coordinates
     if gene_row.empty:
-        g_start, g_end, strand, chrom = 0, 1000, "+", "chr1"
+        chrom, strand, g_start, g_end = "chr1", "+", 0, 1000
+        exons = pd.DataFrame()
+        logger.warning("Gene '%s' not found in GTF; generating empty plot.", gene_name)
     else:
-        g_start = int(gene_row[start_col]) - flank
-        g_end = int(gene_row[end_col]) + flank
-        strand = gene_row[strand_col]
         chrom = gene_row[chrom_col]
+        strand = gene_row[strand_col]
+        g_start = max(0, int(gene_row[start_col]) - flank)
+        g_end = int(gene_row[end_col]) + flank
+        gid_base = gene_row.get("gene_id_base", gene_id_base(gene_row.get("gene_id")))
+        exons = gtf[(gtf[feature_col].astype(str).str.lower() == "exon") & (gtf.get("gene_id_base", gtf.get("gene_id")).map(gene_id_base) == gid_base)]
 
-    # Exons for this gene
-    exon_mask = (gtf[feature_col].str.lower() == "exon")
-    if not gene_row.empty and gene_id_col in gtf.columns:
-        gene_id_val = gene_row.get(gene_id_col)
-        if gene_id_val is not None:
-            exon_mask = exon_mask & (gtf[gene_id_col] == gene_id_val)
-    exons = gtf[exon_mask]
+    pas_sub = _subset_by_gene(pas_sites, gene_row)
+    apa_sub = _subset_by_gene(apa_events, gene_row) if apa_events is not None else pd.DataFrame()
 
-    # PAS sites for this gene
-    pas_gene_col = "gene_id" if "gene_id" in pas_sites.columns else gene_id_col
-    pas_sub = pas_sites
-    if not gene_row.empty and pas_gene_col in pas_sites.columns:
-        gene_id_val = gene_row.get(gene_id_col)
-        pas_sub = pas_sites[pas_sites[pas_gene_col] == gene_id_val]
-
-    # APA events
-    apa_sub = None
-    if apa_events is not None and not apa_events.empty:
-        apa_gene_col = "gene_id" if "gene_id" in apa_events.columns else gene_id_col
-        if not gene_row.empty and apa_gene_col in apa_events.columns:
-            gene_id_val = gene_row.get(gene_id_col)
-            apa_sub = apa_events[apa_events[apa_gene_col] == gene_id_val]
-
-    # Build panel list
-    n_bw = len(bigwig_tracks) if bigwig_tracks else 1
-    n_panels = n_bw + 2  # coverage panels + gene model + PAS+lollipop
-
-    height_ratios = [2] * n_bw + [1, 1]
+    tracks = bigwig_tracks or {}
+    n_bw = max(len(tracks), 1)
+    n_panels = n_bw + 2
     fig, axes = plt.subplots(
         n_panels, 1,
-        figsize=(12, 2 * n_panels),
+        figsize=(13, max(6, 1.8 * n_panels)),
         sharex=True,
-        gridspec_kw={"height_ratios": height_ratios},
+        gridspec_kw={"height_ratios": [2] * n_bw + [1, 1.2]},
     )
-    if n_panels == 1:
-        axes = [axes]
+    axes = list(np.atleast_1d(axes))
+    x_range = np.arange(g_start, g_end)
 
-    x_range = np.arange(max(0, g_start), g_end)
-
-    # Coverage panels
     panel_idx = 0
-    if bigwig_tracks:
-        from .coverage import extract_bigwig_interval
-        for label, bw_path in bigwig_tracks.items():
+    if tracks:
+        for label, track in tracks.items():
             ax = axes[panel_idx]
+            bw_path = select_strand_bigwig(track, strand=strand)
             try:
-                cov = extract_bigwig_interval(bw_path, chrom, max(0, g_start), g_end)
-                draw_coverage(ax, x_range, cov, label=label)
+                cov = extract_bigwig_interval(bw_path, chrom, g_start, g_end)
+                draw_coverage(ax, x_range[: len(cov)], cov, label=label)
+                ax.legend(loc="upper right", fontsize=8)
             except Exception as exc:
-                logger.warning("Could not load bigwig '%s': %s", bw_path, exc)
-                ax.text(0.5, 0.5, f"[coverage unavailable: {label}]",
-                        transform=ax.transAxes, ha="center", va="center")
+                logger.warning("Could not load bigWig for %s: %s", label, exc)
+                ax.text(0.5, 0.5, f"coverage unavailable: {label}", transform=ax.transAxes, ha="center", va="center")
             ax.set_ylabel(label, fontsize=8)
             panel_idx += 1
     else:
-        ax = axes[panel_idx]
-        ax.text(0.5, 0.5, "[no bigWig tracks provided]",
-                transform=ax.transAxes, ha="center", va="center", color="grey")
+        axes[panel_idx].text(0.5, 0.5, "no bigWig tracks", transform=axes[panel_idx].transAxes, ha="center", va="center", color="grey")
         panel_idx += 1
 
-    # Gene model panel
     ax_gene = axes[panel_idx]
     panel_idx += 1
     if not gene_row.empty:
         draw_gene_model(ax_gene, gene_row, exons, strand)
-    ax_gene.set_ylabel("Gene model", fontsize=8)
+    ax_gene.set_ylabel("gene", fontsize=8)
     ax_gene.set_yticks([])
 
-    # PAS + lollipop panel
     ax_pas = axes[panel_idx]
     if not pas_sub.empty:
         draw_pas_sites(ax_pas, pas_sub, y_level=0.0)
-    if apa_sub is not None and not apa_sub.empty:
-        # Try to join pas position to apa events
-        if "start" in pas_sub.columns and "site_id" in apa_sub.columns and "site_id" in pas_sub.columns:
-            apa_with_pos = apa_sub.merge(
-                pas_sub[["site_id", "start"]],
-                on="site_id", how="left",
-            )
-            draw_apa_lollipops(ax_pas, apa_with_pos, y_level=0.2)
-    ax_pas.set_ylabel("PAS / ΔPDUI", fontsize=8)
+    else:
+        ax_pas.text(0.02, 0.75, "no PAS sites for gene", transform=ax_pas.transAxes, fontsize=8, color="grey")
+    if not apa_sub.empty and not pas_sub.empty and {"site_id", "start"}.issubset(pas_sub.columns):
+        site_pos = pas_sub[["site_id", "start"]].copy()
+        site_pos["site_id"] = site_pos["site_id"].astype(str)
+        apa_plot = apa_sub.copy()
+        apa_plot["site_id"] = apa_plot["site_id"].astype(str)
+        apa_plot = apa_plot.merge(site_pos, on="site_id", how="left")
+        if apa_plot["start"].notna().any():
+            draw_apa_lollipops(ax_pas, apa_plot.dropna(subset=["start"]), y_level=0.1, max_height=0.8)
+    elif apa_sub.empty:
+        ax_pas.text(0.02, 0.55, "no APA events for selected comparison/gene", transform=ax_pas.transAxes, fontsize=8, color="grey")
+    ax_pas.axhline(0, color="black", linewidth=0.5)
+    ax_pas.set_ylabel("PAS / dPDUI", fontsize=8)
     ax_pas.set_yticks([])
 
-    title_parts = [gene_name]
+    title = [gene_name]
     if group_a and group_b:
-        title_parts.append(f"{group_a} vs {group_b}")
+        title.append(f"{group_a} vs {group_b}")
     if celltype:
-        title_parts.append(f"[{celltype}]")
-    fig.suptitle(" · ".join(title_parts), fontsize=11)
+        title.append(celltype)
+    fig.suptitle(" | ".join(title), fontsize=12)
     axes[-1].set_xlabel(f"{chrom} (0-based)", fontsize=9)
-
+    axes[-1].set_xlim(g_start, g_end)
     plt.tight_layout()
 
     if output:
-        save_figure(fig, output)
+        _save_png_pdf(fig, output)
     if show:
         plt.show()
-
-    return fig, list(axes)
+    return fig, axes

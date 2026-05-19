@@ -3,17 +3,13 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from .io import add_gene_id_columns, gene_id_base, parse_site_id
+
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# APA event classification
-# ---------------------------------------------------------------------------
 
 
 def classify_apa_events(
@@ -23,61 +19,123 @@ def classify_apa_events(
     fdr_cutoff: float = 0.05,
     delta_cutoff: float = 0.15,
 ) -> pd.DataFrame:
-    """Classify APA events and add classification columns.
-
-    Added columns
-    -------------
-    is_fdr_significant : bool
-    is_delta_candidate : bool
-    is_fdr_and_delta   : bool
-    abs_delta_pdui     : float
-    direction          : 'lengthening' | 'shortening' | 'none'
-    priority_class     : 'fdr_and_delta' | 'fdr_only' | 'delta_only' | 'not_significant'
-    """
+    """Classify APA events by FDR and absolute delta-PDUI thresholds."""
     df = events.copy()
+    if df.empty:
+        return df
     if fdr_col not in df.columns:
         raise ValueError(f"FDR column '{fdr_col}' not found in events DataFrame.")
     if delta_col not in df.columns:
         raise ValueError(f"Delta column '{delta_col}' not found in events DataFrame.")
 
+    df = add_gene_id_columns(df)
+    df[delta_col] = pd.to_numeric(df[delta_col], errors="coerce")
+    df[fdr_col] = pd.to_numeric(df[fdr_col], errors="coerce")
     df["abs_delta_pdui"] = df[delta_col].abs()
     df["is_fdr_significant"] = df[fdr_col] < fdr_cutoff
     df["is_delta_candidate"] = df["abs_delta_pdui"] >= delta_cutoff
     df["is_fdr_and_delta"] = df["is_fdr_significant"] & df["is_delta_candidate"]
 
-    def _direction(val: float) -> str:
-        if val > 0:
-            return "lengthening"
-        if val < 0:
-            return "shortening"
-        return "none"
-
-    df["direction"] = df[delta_col].apply(_direction)
-
-    def _priority(row: pd.Series) -> str:
-        if row["is_fdr_and_delta"]:
-            return "fdr_and_delta"
-        if row["is_fdr_significant"]:
-            return "fdr_only"
-        if row["is_delta_candidate"]:
-            return "delta_only"
-        return "not_significant"
-
-    df["priority_class"] = df.apply(_priority, axis=1)
-    logger.info(
-        "Classified %d APA events: %d fdr_and_delta, %d fdr_only, %d delta_only, %d not_significant",
-        len(df),
-        (df["priority_class"] == "fdr_and_delta").sum(),
-        (df["priority_class"] == "fdr_only").sum(),
-        (df["priority_class"] == "delta_only").sum(),
-        (df["priority_class"] == "not_significant").sum(),
+    df["direction"] = np.select(
+        [df[delta_col] > 0, df[delta_col] < 0],
+        ["lengthening", "shortening"],
+        default="none",
+    )
+    df["priority_class"] = np.select(
+        [
+            df["is_fdr_and_delta"],
+            df["is_fdr_significant"],
+            df["is_delta_candidate"],
+        ],
+        ["fdr_and_delta", "fdr_only", "delta_only"],
+        default="not_significant",
     )
     return df
 
 
-# ---------------------------------------------------------------------------
-# PAS site merging
-# ---------------------------------------------------------------------------
+def _ensure_pas_columns(df: pd.DataFrame, source: str) -> pd.DataFrame:
+    out = df.copy()
+    if out.empty:
+        return out
+    if "site_id" not in out.columns:
+        raise ValueError(f"PAS table for {source} lacks site_id")
+    parsed = pd.DataFrame([parse_site_id(sid) for sid in out["site_id"]])
+    for col in ("gene_id", "gene_id_base", "chrom", "start", "end", "strand"):
+        if col not in out.columns and col in parsed.columns:
+            out[col] = parsed[col]
+    if "gene_id_base" not in out.columns and "gene_id" in out.columns:
+        out["gene_id_base"] = out["gene_id"].map(gene_id_base)
+    if "source" not in out.columns:
+        out["source"] = source
+    required = ["site_id", "gene_id", "chrom", "start", "end", "strand", "gene_id_base"]
+    missing = [c for c in required if c not in out.columns]
+    if missing:
+        raise ValueError(f"PAS table for {source} missing columns after parsing: {missing}")
+    out["start"] = pd.to_numeric(out["start"], errors="coerce")
+    out["end"] = pd.to_numeric(out["end"], errors="coerce")
+    out = out.dropna(subset=["start", "end"]).copy()
+    out["start"] = out["start"].astype(int)
+    out["end"] = out["end"].astype(int)
+    out["source"] = out["source"].fillna(source).astype(str)
+    return out
+
+
+def _collapse_values(values: pd.Series) -> object:
+    vals = [str(v) for v in values.dropna().astype(str) if str(v) and str(v) != "nan"]
+    unique = sorted(set(vals))
+    if not unique:
+        return pd.NA
+    if len(unique) == 1:
+        return unique[0]
+    return ",".join(unique)
+
+
+def _merge_group(group: pd.DataFrame, window: int) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    current: list[int] = []
+    current_center: float | None = None
+
+    for idx, row in group.sort_values("start").iterrows():
+        center = (int(row["start"]) + int(row["end"])) / 2
+        if current and current_center is not None and abs(center - current_center) > window:
+            rows.append(_collapse_cluster(group.loc[current]))
+            current = []
+            current_center = None
+        current.append(idx)
+        if current_center is None:
+            current_center = center
+        else:
+            current_center = float(np.mean([(group.loc[i, "start"] + group.loc[i, "end"]) / 2 for i in current]))
+    if current:
+        rows.append(_collapse_cluster(group.loc[current]))
+    return rows
+
+
+def _collapse_cluster(cluster: pd.DataFrame) -> dict[str, object]:
+    first = cluster.iloc[0]
+    sources = sorted(set(",".join(cluster["source"].astype(str)).split(",")))
+    row: dict[str, object] = {
+        "site_id": _collapse_values(cluster["site_id"]),
+        "gene_id": _collapse_values(cluster["gene_id"]),
+        "gene_id_base": first["gene_id_base"],
+        "chrom": first["chrom"],
+        "start": int(cluster["start"].min()),
+        "end": int(cluster["end"].max()),
+        "strand": first["strand"],
+        "source": ",".join(s for s in sources if s),
+        "n_sources": len([s for s in sources if s]),
+    }
+    for col in cluster.columns:
+        if col in row or col in {"gene_id_base", "chrom", "start", "end", "strand"}:
+            continue
+        if pd.api.types.is_numeric_dtype(cluster[col]):
+            if col.endswith("count") or col.startswith("sierra_"):
+                row[col] = cluster[col].sum(skipna=True)
+            else:
+                row[col] = cluster[col].dropna().iloc[0] if cluster[col].notna().any() else pd.NA
+        elif col in {"site_source", "reference_source", "site_class", "priming_flag", "sierra_groups", "scapture_sample", "original_gene_name"}:
+            row[col] = _collapse_values(cluster[col])
+    return row
 
 
 def merge_sierra_scapture_sites(
@@ -85,91 +143,33 @@ def merge_sierra_scapture_sites(
     scapture_sites: pd.DataFrame,
     window: int = 25,
 ) -> pd.DataFrame:
-    """Merge PAS sites from Sierra Quant and scapture using coordinate proximity.
-
-    Sites within ``window`` bp are considered the same site.  The merged site
-    adopts the Sierra site_id; scapture-only sites are appended.
-    """
-    start_col = "start" if "start" in sierra_sites.columns else "Start"
-    chrom_col = "chrom" if "chrom" in sierra_sites.columns else "Chromosome"
-    gene_col = "gene_id" if "gene_id" in sierra_sites.columns else "GeneID"
-    strand_col = "strand" if "strand" in sierra_sites.columns else "Strand"
-
-    merged = sierra_sites.copy()
-    merged["source"] = "sierra"
-
-    unmatched = []
-    for _, sc_row in scapture_sites.iterrows():
-        chrom = sc_row.get(chrom_col)
-        pos = sc_row.get(start_col)
-        gene = sc_row.get(gene_col)
-        same = merged[
-            (merged[chrom_col] == chrom)
-            & (merged[gene_col] == gene)
-            & ((merged[start_col] - pos).abs() <= window)
-        ]
-        if same.empty:
-            row_copy = sc_row.copy()
-            row_copy["source"] = "scapture"
-            unmatched.append(row_copy)
-        else:
-            idx = same.index[0]
-            existing_src = merged.at[idx, "source"]
-            if "scapture" not in str(existing_src):
-                merged.at[idx, "source"] = existing_src + ",scapture"
-
-    if unmatched:
-        unmatched_df = pd.DataFrame(unmatched)
-        merged = pd.concat([merged, unmatched_df], ignore_index=True)
-
-    logger.info("Merged %d sierra + %d scapture → %d unified sites",
-                len(sierra_sites), len(scapture_sites), len(merged))
-    return merged
-
-
-# ---------------------------------------------------------------------------
-# PAS site ranking and support
-# ---------------------------------------------------------------------------
+    """Merge Sierra and scapture PAS sites by gene/chrom/strand and coordinate proximity."""
+    return build_unified_pas_table(sierra_sites=sierra_sites, scapture_sites=scapture_sites, window=window)
 
 
 def rank_pas_within_gene(pas_sites: pd.DataFrame) -> pd.DataFrame:
-    """Rank PAS sites within each gene by position, strand-aware.
-
-    For + strand: rank 1 = most 5' site (lowest start).
-    For − strand: rank 1 = most 5' site (highest end or start for − genes,
-    i.e. largest genomic coordinate).
-
-    Adds column ``pas_rank_in_gene``.
-    """
+    """Rank PAS sites within each gene by transcript-strand direction."""
     df = pas_sites.copy()
-    start_col = "start" if "start" in df.columns else "Start"
-    gene_col = "gene_id" if "gene_id" in df.columns else "GeneID"
-    strand_col = "strand" if "strand" in df.columns else "Strand"
-
+    if df.empty:
+        df["pas_rank_in_gene"] = []
+        return df
+    gene_col = "gene_id_base" if "gene_id_base" in df.columns else "gene_id"
     df["pas_rank_in_gene"] = 0
-    for (gene, strand), grp in df.groupby([gene_col, strand_col]):
+    for (_, strand), grp in df.groupby([gene_col, "strand"], observed=True):
         if strand == "+":
-            order = grp[start_col].rank(method="first").astype(int)
+            order = grp["start"].rank(method="first").astype(int)
         else:
-            order = grp[start_col].rank(method="first", ascending=False).astype(int)
+            order = grp["start"].rank(method="first", ascending=False).astype(int)
         df.loc[grp.index, "pas_rank_in_gene"] = order.values
-
     return df
 
 
 def summarize_pas_support(pas_sites: pd.DataFrame) -> pd.DataFrame:
-    """Summarize how many sources support each PAS site.
-
-    Expects a ``source`` column with comma-separated source names.
-    Adds ``n_sources`` column.
-    """
+    """Add or refresh source-count support columns."""
     df = pas_sites.copy()
     if "source" not in df.columns:
-        df["n_sources"] = 1
-        return df
-    df["n_sources"] = df["source"].apply(
-        lambda s: len(str(s).split(",")) if pd.notna(s) else 0
-    )
+        df["source"] = "unknown"
+    df["n_sources"] = df["source"].apply(lambda s: len([x for x in str(s).split(",") if x]))
     return df
 
 
@@ -179,37 +179,25 @@ def build_unified_pas_table(
     scapture_sites: pd.DataFrame | None = None,
     window: int = 25,
 ) -> pd.DataFrame:
-    """Build a unified PAS site table from multiple sources.
-
-    Merges whatever combination of sources is provided.
-    """
+    """Build a coordinate-merged PAS table from scPolASeq, Sierra, and scapture sources."""
     frames: list[pd.DataFrame] = []
-
-    if scpolaseq_sites is not None and not scpolaseq_sites.empty:
-        sp = scpolaseq_sites.copy()
-        if "source" not in sp.columns:
-            sp["source"] = "scpolaseq"
-        frames.append(sp)
-
-    if sierra_sites is not None and scapture_sites is not None:
-        merged = merge_sierra_scapture_sites(sierra_sites, scapture_sites, window=window)
-        frames.append(merged)
-    elif sierra_sites is not None:
-        s = sierra_sites.copy()
-        if "source" not in s.columns:
-            s["source"] = "sierra"
-        frames.append(s)
-    elif scapture_sites is not None:
-        sc = scapture_sites.copy()
-        if "source" not in sc.columns:
-            sc["source"] = "scapture"
-        frames.append(sc)
-
+    for source, frame in (
+        ("scpolaseq", scpolaseq_sites),
+        ("sierra", sierra_sites),
+        ("scapture", scapture_sites),
+    ):
+        if frame is not None and not frame.empty:
+            frames.append(_ensure_pas_columns(frame, source))
     if not frames:
         return pd.DataFrame()
 
-    unified = pd.concat(frames, ignore_index=True)
+    all_sites = pd.concat(frames, ignore_index=True, sort=False)
+    merged_rows: list[dict[str, object]] = []
+    group_cols = ["gene_id_base", "chrom", "strand"]
+    for _, group in all_sites.groupby(group_cols, observed=True, dropna=False):
+        merged_rows.extend(_merge_group(group, window=window))
+    unified = pd.DataFrame(merged_rows)
     unified = summarize_pas_support(unified)
     unified = rank_pas_within_gene(unified)
-    logger.info("Built unified PAS table with %d sites", len(unified))
+    logger.info("Built unified PAS table with %d merged sites from %d source rows", len(unified), len(all_sites))
     return unified

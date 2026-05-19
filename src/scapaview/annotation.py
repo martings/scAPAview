@@ -1,13 +1,7 @@
 """Genomic annotation utilities for scAPAview.
 
-Coordinate convention
----------------------
-All internal coordinates are **0-based half-open** (BED-style).  GTF files
-use 1-based inclusive coordinates, so when reading a GTF we subtract 1 from
-the *Start* column to convert to 0-based:
-
-    gtf_start_0based = gtf_Start - 1   # (Start was 1-based inclusive)
-    gtf_end_0based   = gtf_End          # (End was 1-based inclusive → same as 0-based exclusive)
+Internal coordinates are 0-based half-open. GTF inputs are converted from
+1-based inclusive by subtracting 1 from Start and leaving End unchanged.
 """
 
 from __future__ import annotations
@@ -17,254 +11,198 @@ import logging
 import numpy as np
 import pandas as pd
 
+from .io import add_gene_id_columns, gene_id_base, normalize_chromosome
+
 logger = logging.getLogger(__name__)
 
-# PAS context categories (ordered from 5' to 3')
 PAS_CONTEXT_CATEGORIES = [
-    "5UTR",
-    "CDS",
-    "intron",
-    "last_intron",
-    "terminal_exon",
-    "3UTR",
-    "downstream_TES",
-    "intergenic",
-    "unknown",
+    "5UTR", "CDS", "intron", "last_intron", "terminal_exon", "3UTR",
+    "downstream_TES", "intergenic", "unknown",
 ]
 
 
-# ---------------------------------------------------------------------------
-# GTF standardisation
-# ---------------------------------------------------------------------------
+def _col(df: pd.DataFrame, lower: str, upper: str) -> str:
+    if lower in df.columns:
+        return lower
+    if upper in df.columns:
+        return upper
+    raise KeyError(f"Expected column '{lower}' or '{upper}'")
 
 
 def standardize_gtf(gtf: pd.DataFrame) -> pd.DataFrame:
-    """Convert GTF DataFrame to 0-based half-open coordinates.
-
-    GTF Start (1-based inclusive) → subtract 1.
-    GTF End   (1-based inclusive) → keep (becomes 0-based exclusive).
-    """
-    gtf = gtf.copy()
-    if "Start" in gtf.columns:
-        gtf["Start"] = gtf["Start"] - 1
-    elif "start" in gtf.columns:
-        gtf["start"] = gtf["start"] - 1
-    return gtf
+    """Convert GTF coordinates to 0-based half-open and add helper columns."""
+    out = gtf.copy()
+    if "Start" in out.columns:
+        out["Start"] = pd.to_numeric(out["Start"], errors="coerce") - 1
+        out["Start"] = out["Start"].astype(int)
+    elif "start" in out.columns:
+        out["start"] = pd.to_numeric(out["start"], errors="coerce") - 1
+        out["start"] = out["start"].astype(int)
+    if "End" in out.columns:
+        out["End"] = pd.to_numeric(out["End"], errors="coerce").astype(int)
+    elif "end" in out.columns:
+        out["end"] = pd.to_numeric(out["end"], errors="coerce").astype(int)
+    chrom_col = "Chromosome" if "Chromosome" in out.columns else "chrom" if "chrom" in out.columns else None
+    if chrom_col:
+        out[chrom_col] = out[chrom_col].map(normalize_chromosome)
+    if "gene_id" in out.columns:
+        out = add_gene_id_columns(out)
+    return out
 
 
 def build_gene_table(gtf: pd.DataFrame) -> pd.DataFrame:
     """Extract gene-level records from a GTF DataFrame."""
-    feature_col = "Feature" if "Feature" in gtf.columns else "feature"
-    mask = gtf[feature_col].str.lower() == "gene"
-    return gtf.loc[mask].reset_index(drop=True)
+    feature_col = _col(gtf, "feature", "Feature")
+    genes = gtf.loc[gtf[feature_col].astype(str).str.lower() == "gene"].copy()
+    if "gene_id" in genes.columns and "gene_id_base" not in genes.columns:
+        genes = add_gene_id_columns(genes)
+    return genes.reset_index(drop=True)
 
 
 def build_exon_table(gtf: pd.DataFrame) -> pd.DataFrame:
     """Extract exon-level records from a GTF DataFrame."""
-    feature_col = "Feature" if "Feature" in gtf.columns else "feature"
-    mask = gtf[feature_col].str.lower() == "exon"
-    return gtf.loc[mask].reset_index(drop=True)
-
-
-# ---------------------------------------------------------------------------
-# Derived annotation tables
-# ---------------------------------------------------------------------------
+    feature_col = _col(gtf, "feature", "Feature")
+    exons = gtf.loc[gtf[feature_col].astype(str).str.lower() == "exon"].copy()
+    if "gene_id" in exons.columns and "gene_id_base" not in exons.columns:
+        exons = add_gene_id_columns(exons)
+    return exons.reset_index(drop=True)
 
 
 def derive_terminal_exons(exons: pd.DataFrame) -> pd.DataFrame:
-    """Return the terminal (last) exon for each transcript, strand-aware.
-
-    For + strand the terminal exon has the largest *Start*.
-    For − strand the terminal exon has the smallest *Start*.
-    """
-    start_col = "Start" if "Start" in exons.columns else "start"
-    strand_col = "Strand" if "Strand" in exons.columns else "strand"
+    """Return terminal exons per transcript, strand-aware."""
+    if exons.empty:
+        return pd.DataFrame(columns=exons.columns)
+    start_col = _col(exons, "start", "Start")
+    strand_col = _col(exons, "strand", "Strand")
     gene_col = "gene_id" if "gene_id" in exons.columns else "GeneID"
     tx_col = "transcript_id" if "transcript_id" in exons.columns else "TranscriptID"
-
     results = []
-    for (gene, tx, strand), grp in exons.groupby([gene_col, tx_col, strand_col], observed=True):
-        if strand == "+":
-            idx = grp[start_col].idxmax()
-        else:
-            idx = grp[start_col].idxmin()
+    for (_, _, strand), grp in exons.groupby([gene_col, tx_col, strand_col], observed=True):
+        idx = grp[start_col].idxmax() if strand == "+" else grp[start_col].idxmin()
         results.append(grp.loc[idx])
-
-    if not results:
-        return pd.DataFrame(columns=exons.columns)
-    return pd.DataFrame(results).reset_index(drop=True)
+    return pd.DataFrame(results).reset_index(drop=True) if results else pd.DataFrame(columns=exons.columns)
 
 
 def derive_introns(exons: pd.DataFrame) -> pd.DataFrame:
-    """Derive intron coordinates from exon coordinates per transcript.
-
-    Intron [i] spans from end of exon[i] to start of exon[i+1]
-    (in genomic order regardless of strand).
-    """
-    start_col = "Start" if "Start" in exons.columns else "start"
-    end_col = "End" if "End" in exons.columns else "end"
-    chrom_col = "Chromosome" if "Chromosome" in exons.columns else "chrom"
-    strand_col = "Strand" if "Strand" in exons.columns else "strand"
+    """Derive intron intervals from exon coordinates per transcript."""
+    start_col = _col(exons, "start", "Start")
+    end_col = _col(exons, "end", "End")
+    chrom_col = _col(exons, "chrom", "Chromosome")
+    strand_col = _col(exons, "strand", "Strand")
     gene_col = "gene_id" if "gene_id" in exons.columns else "GeneID"
     tx_col = "transcript_id" if "transcript_id" in exons.columns else "TranscriptID"
-
     introns = []
-    for (gene, tx, chrom, strand), grp in exons.groupby(
-        [gene_col, tx_col, chrom_col, strand_col], observed=True
-    ):
-        grp_sorted = grp.sort_values(start_col)
-        starts = grp_sorted[start_col].values
-        ends = grp_sorted[end_col].values
+    for (gene, tx, chrom, strand), grp in exons.groupby([gene_col, tx_col, chrom_col, strand_col], observed=True):
+        grp = grp.sort_values(start_col)
+        starts = grp[start_col].to_numpy()
+        ends = grp[end_col].to_numpy()
         for i in range(len(starts) - 1):
-            introns.append(
-                {
-                    gene_col: gene,
-                    tx_col: tx,
-                    chrom_col: chrom,
-                    strand_col: strand,
-                    start_col: ends[i],
-                    end_col: starts[i + 1],
-                    "Feature": "intron",
-                }
-            )
-
-    if not introns:
-        return pd.DataFrame(
-            columns=[gene_col, tx_col, chrom_col, strand_col, start_col, end_col, "Feature"]
-        )
-    return pd.DataFrame(introns).reset_index(drop=True)
+            if starts[i + 1] > ends[i]:
+                introns.append({gene_col: gene, tx_col: tx, chrom_col: chrom, strand_col: strand, start_col: int(ends[i]), end_col: int(starts[i + 1]), "Feature": "intron"})
+    return pd.DataFrame(introns)
 
 
 def derive_splice_sites(exons: pd.DataFrame) -> pd.DataFrame:
-    """Extract 5' and 3' splice site positions from exon coordinates.
-
-    Returns a DataFrame with columns:
-    gene_id, transcript_id, chrom, strand, position, splice_site_type
-    """
-    start_col = "Start" if "Start" in exons.columns else "start"
-    end_col = "End" if "End" in exons.columns else "end"
-    chrom_col = "Chromosome" if "Chromosome" in exons.columns else "chrom"
-    strand_col = "Strand" if "Strand" in exons.columns else "strand"
+    """Extract donor/acceptor splice-site positions from exon coordinates."""
+    if exons.empty:
+        return pd.DataFrame(columns=["gene_id", "transcript_id", "chrom", "strand", "position", "splice_site_type"])
+    start_col = _col(exons, "start", "Start")
+    end_col = _col(exons, "end", "End")
+    chrom_col = _col(exons, "chrom", "Chromosome")
+    strand_col = _col(exons, "strand", "Strand")
     gene_col = "gene_id" if "gene_id" in exons.columns else "GeneID"
     tx_col = "transcript_id" if "transcript_id" in exons.columns else "TranscriptID"
-
     sites = []
-    for (gene, tx, chrom, strand), grp in exons.groupby(
-        [gene_col, tx_col, chrom_col, strand_col], observed=True
-    ):
-        grp_sorted = grp.sort_values(start_col)
-        starts = grp_sorted[start_col].values
-        ends = grp_sorted[end_col].values
-        n = len(starts)
-        for i in range(n):
-            # Donor (5' splice site) and acceptor (3' splice site) depend on strand
-            if i < n - 1:  # not last exon → has a downstream intron
-                if strand == "+":
-                    sites.append(
-                        {gene_col: gene, tx_col: tx, chrom_col: chrom,
-                         strand_col: strand, "position": int(ends[i]),
-                         "splice_site_type": "donor"}
-                    )
-                else:
-                    sites.append(
-                        {gene_col: gene, tx_col: tx, chrom_col: chrom,
-                         strand_col: strand, "position": int(starts[i]),
-                         "splice_site_type": "donor"}
-                    )
-            if i > 0:  # not first exon → has an upstream intron
-                if strand == "+":
-                    sites.append(
-                        {gene_col: gene, tx_col: tx, chrom_col: chrom,
-                         strand_col: strand, "position": int(starts[i]),
-                         "splice_site_type": "acceptor"}
-                    )
-                else:
-                    sites.append(
-                        {gene_col: gene, tx_col: tx, chrom_col: chrom,
-                         strand_col: strand, "position": int(ends[i]),
-                         "splice_site_type": "acceptor"}
-                    )
-
-    if not sites:
-        return pd.DataFrame(
-            columns=[gene_col, tx_col, chrom_col, strand_col, "position", "splice_site_type"]
-        )
+    for (gene, tx, chrom, strand), grp in exons.groupby([gene_col, tx_col, chrom_col, strand_col], observed=True):
+        grp = grp.sort_values(start_col)
+        starts = grp[start_col].to_numpy()
+        ends = grp[end_col].to_numpy()
+        for i in range(len(starts)):
+            if i < len(starts) - 1:
+                sites.append({gene_col: gene, tx_col: tx, chrom_col: chrom, strand_col: strand, "position": int(ends[i] if strand == "+" else starts[i]), "splice_site_type": "donor"})
+            if i > 0:
+                sites.append({gene_col: gene, tx_col: tx, chrom_col: chrom, strand_col: strand, "position": int(starts[i] if strand == "+" else ends[i]), "splice_site_type": "acceptor"})
     return pd.DataFrame(sites).drop_duplicates().reset_index(drop=True)
 
 
-# ---------------------------------------------------------------------------
-# PAS annotation
-# ---------------------------------------------------------------------------
+def annotate_intervals_with_gene_context(intervals: pd.DataFrame, gtf: pd.DataFrame) -> pd.DataFrame:
+    """Annotate intervals with overlapping gene metadata using a midpoint heuristic."""
+    return annotate_pas_context(intervals, gtf)
 
 
 def annotate_pas_context(
-    pas_sites: pd.DataFrame, gtf: pd.DataFrame
+    pas_sites: pd.DataFrame,
+    gtf: pd.DataFrame,
+    terminal_exons: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Annotate each PAS site with a genomic context region.
+    """Annotate PAS sites with gene-region context.
 
-    Adds a ``pas_context`` column with one of the PAS_CONTEXT_CATEGORIES.
-    This is a simplified heuristic annotation based on overlap with GTF features.
+    The heuristic prioritizes explicit UTR/CDS features from GTF, then pipeline
+    terminal exons, then gene overlap as intronic/intergenic context.
     """
     pas = pas_sites.copy()
-    pas["pas_context"] = "intergenic"
+    if pas.empty:
+        pas["pas_context"] = []
+        return pas
+    if "gene_id_base" not in pas.columns and "gene_id" in pas.columns:
+        pas["gene_id_base"] = pas["gene_id"].map(gene_id_base)
 
-    feature_col = "Feature" if "Feature" in gtf.columns else "feature"
-    chrom_col_gtf = "Chromosome" if "Chromosome" in gtf.columns else "chrom"
-    start_col_gtf = "Start" if "Start" in gtf.columns else "start"
-    end_col_gtf = "End" if "End" in gtf.columns else "end"
-    strand_col_gtf = "Strand" if "Strand" in gtf.columns else "strand"
+    feature_col = _col(gtf, "feature", "Feature")
+    chrom_col = _col(gtf, "chrom", "Chromosome")
+    start_col = _col(gtf, "start", "Start")
+    end_col = _col(gtf, "end", "End")
+    strand_col = _col(gtf, "strand", "Strand")
+    gene_col = "gene_id_base" if "gene_id_base" in gtf.columns else "gene_id"
 
-    chrom_col_pas = "chrom" if "chrom" in pas.columns else "Chromosome"
-    start_col_pas = "start" if "start" in pas.columns else "Start"
-    end_col_pas = "end" if "end" in pas.columns else "End"
-    strand_col_pas = "strand" if "strand" in pas.columns else "Strand"
+    features = gtf[[chrom_col, start_col, end_col, strand_col, feature_col, gene_col]].copy()
+    features[feature_col] = features[feature_col].astype(str).str.lower()
+    genes = features[features[feature_col] == "gene"]
+    utr3 = features[features[feature_col].isin(["three_prime_utr", "3utr"])]
+    utr5 = features[features[feature_col].isin(["five_prime_utr", "5utr"])]
+    cds = features[features[feature_col] == "cds"]
 
-    for idx, row in pas.iterrows():
-        chrom = row[chrom_col_pas]
-        pos = int(row[start_col_pas])
-        strand = row[strand_col_pas]
-        context = _classify_context(
-            chrom, pos, strand, gtf,
-            feature_col, chrom_col_gtf, start_col_gtf, end_col_gtf, strand_col_gtf
-        )
-        pas.at[idx, "pas_context"] = context
+    terminal = None
+    if terminal_exons is not None and not terminal_exons.empty:
+        terminal = terminal_exons.copy()
+        if "gene_id_base" not in terminal.columns and "gene_id" in terminal.columns:
+            terminal["gene_id_base"] = terminal["gene_id"].map(gene_id_base)
 
+    contexts = []
+    for _, row in pas.iterrows():
+        chrom = row.get("chrom") or row.get("Chromosome")
+        strand = row.get("strand") or row.get("Strand")
+        pos = int(row.get("start", row.get("Start")))
+        gid = row.get("gene_id_base", gene_id_base(row.get("gene_id", "")))
+        contexts.append(_classify_position(chrom, pos, strand, gid, genes, utr3, utr5, cds, terminal))
+    pas["pas_context"] = contexts
     return pas
 
 
-def _classify_context(
-    chrom: str,
-    pos: int,
-    strand: str,
-    gtf: pd.DataFrame,
-    feature_col: str,
-    chrom_col: str,
-    start_col: str,
-    end_col: str,
-    strand_col: str,
-) -> str:
-    """Classify a single genomic position into a PAS context."""
-    region = gtf[
-        (gtf[chrom_col] == chrom)
-        & (gtf[start_col] <= pos)
-        & (gtf[end_col] > pos)
-        & (gtf[strand_col] == strand)
-    ]
-    if region.empty:
-        return "intergenic"
+def _overlaps(df: pd.DataFrame, chrom: str, pos: int, strand: str, gene: str | None = None) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    chrom_col = "chrom" if "chrom" in df.columns else "Chromosome"
+    start_col = "start" if "start" in df.columns else "Start"
+    end_col = "end" if "end" in df.columns else "End"
+    strand_col = "strand" if "strand" in df.columns else "Strand"
+    mask = (df[chrom_col] == chrom) & (df[start_col] <= pos) & (df[end_col] >= pos) & (df[strand_col] == strand)
+    if gene and "gene_id_base" in df.columns:
+        mask &= df["gene_id_base"] == gene
+    return df[mask]
 
-    features = set(region[feature_col].str.lower().unique())
-    if "three_prime_utr" in features or "3utr" in features:
+
+def _classify_position(chrom, pos, strand, gid, genes, utr3, utr5, cds, terminal) -> str:
+    if not _overlaps(utr3, chrom, pos, strand, gid).empty:
         return "3UTR"
-    if "five_prime_utr" in features or "5utr" in features:
+    if not _overlaps(utr5, chrom, pos, strand, gid).empty:
         return "5UTR"
-    if "cds" in features:
+    if not _overlaps(cds, chrom, pos, strand, gid).empty:
         return "CDS"
-    if "exon" in features:
+    if terminal is not None and not _overlaps(terminal, chrom, pos, strand, gid).empty:
         return "terminal_exon"
-    if "gene" in features:
+    if not _overlaps(genes, chrom, pos, strand, gid).empty:
         return "intron"
-    return "unknown"
+    return "intergenic"
 
 
 def distance_to_nearest_splice_site(
@@ -272,63 +210,56 @@ def distance_to_nearest_splice_site(
     splice_sites: pd.DataFrame,
     window: int = 100,
 ) -> pd.DataFrame:
-    """Compute distance from each PAS site to the nearest splice site.
-
-    Adds columns:
-    - nearest_splice_site_type: 'donor' | 'acceptor' | None
-    - nearest_splice_site_distance: int
-    - is_splice_proximal: bool (True if distance <= window)
-    """
+    """Compute distance from each PAS site to the nearest splice site."""
     pas = pas_sites.copy()
     pas["nearest_splice_site_type"] = None
     pas["nearest_splice_site_distance"] = np.nan
     pas["is_splice_proximal"] = False
-
-    if splice_sites.empty:
+    if splice_sites.empty or pas.empty:
         return pas
 
     chrom_col_pas = "chrom" if "chrom" in pas.columns else "Chromosome"
     start_col_pas = "start" if "start" in pas.columns else "Start"
+    strand_col_pas = "strand" if "strand" in pas.columns else "Strand"
     chrom_col_ss = "chrom" if "chrom" in splice_sites.columns else "Chromosome"
+    strand_col_ss = "strand" if "strand" in splice_sites.columns else "Strand"
+    grouped = {(c, s): g for (c, s), g in splice_sites.groupby([chrom_col_ss, strand_col_ss], observed=True)}
 
     for idx, row in pas.iterrows():
-        chrom = row[chrom_col_pas]
-        pos = int(row[start_col_pas])
-        same_chrom = splice_sites[splice_sites[chrom_col_ss] == chrom]
-        if same_chrom.empty:
+        same = grouped.get((row[chrom_col_pas], row[strand_col_pas]))
+        if same is None or same.empty:
             continue
-        dists = np.abs(same_chrom["position"].values - pos)
+        pos = int(row[start_col_pas])
+        dists = np.abs(same["position"].to_numpy() - pos)
         min_i = int(np.argmin(dists))
         min_dist = int(dists[min_i])
         pas.at[idx, "nearest_splice_site_distance"] = min_dist
-        pas.at[idx, "nearest_splice_site_type"] = same_chrom.iloc[min_i]["splice_site_type"]
+        pas.at[idx, "nearest_splice_site_type"] = same.iloc[min_i]["splice_site_type"]
         pas.at[idx, "is_splice_proximal"] = min_dist <= window
-
     return pas
 
 
-# ---------------------------------------------------------------------------
-# Relative position
-# ---------------------------------------------------------------------------
-
-
-def compute_relative_position(
-    site_pos: int,
-    region_start: int,
-    region_end: int,
-    strand: str,
-) -> float:
-    """Compute relative position [0, 1] of a site within a region, strand-aware.
-
-    For + strand: 0 = region_start (5' end), 1 = region_end (3' end).
-    For − strand: 0 = region_end   (5' end), 1 = region_start (3' end).
-
-    Returns float in [0, 1] or np.nan if region has zero length.
-    """
+def compute_relative_position(site_pos: int, region_start: int, region_end: int, strand: str) -> float:
+    """Compute relative position [0, 1] of a site within a region, strand-aware."""
     length = region_end - region_start
     if length <= 0:
         return float("nan")
     if strand == "+":
         return (site_pos - region_start) / length
-    else:
-        return (region_end - site_pos) / length
+    return (region_end - site_pos) / length
+
+
+def terminal_regions_for_genes(terminal_exons: pd.DataFrame, genes: list[str], gene_table: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Return terminal exon regions matching gene symbols or gene ids."""
+    regions = terminal_exons.copy()
+    if regions.empty:
+        return regions
+    if "gene_id_base" not in regions.columns and "gene_id" in regions.columns:
+        regions["gene_id_base"] = regions["gene_id"].map(gene_id_base)
+    candidates = set(genes)
+    if gene_table is not None and "gene_name" in gene_table.columns:
+        gt = gene_table.copy()
+        if "gene_id_base" not in gt.columns and "gene_id" in gt.columns:
+            gt["gene_id_base"] = gt["gene_id"].map(gene_id_base)
+        candidates.update(gt.loc[gt["gene_name"].isin(genes), "gene_id_base"].dropna().astype(str))
+    return regions[regions["gene_id_base"].isin(candidates) | regions.get("gene_id", pd.Series(dtype=str)).isin(candidates)].copy()
