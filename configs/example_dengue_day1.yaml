@@ -3,36 +3,48 @@ project:
   output_dir: outputs/scapaview
 
 reference:
-  gtf: /path/to/gencode.v44.annotation.gtf
-  gene_info: /path/to/geneInfo.tab
+  gtf: /scratch/users/fabro/scPolASeq_dengue/results/day1/reference/reference.annotation.gtf
+  gene_info: /scratch/users/fabro/scPolASeq_dengue/results/day1/reference/star_index/geneInfo.tab
+  terminal_exons: /scratch/users/fabro/scPolASeq_dengue/results/day1/reference/terminal_exons.tsv
+  known_polya: /scratch/users/fabro/scPolASeq_dengue/results/day1/reference/known_polya.reference.tsv
 
 scpolaseq:
-  site_catalog: /path/to/apa/site_catalog.tsv
-  pas_reference: /path/to/pas_reference/pas_reference.tsv
-  pdui_matrix: /path/to/apa_calls/pdui_usage_matrix.tsv
-  apa_events: /path/to/apa_calls/apa_events.tsv
+  site_catalog: /scratch/users/fabro/scPolASeq_dengue/results/day1/apa/site_catalog.tsv
+  site_catalog_bed: /scratch/users/fabro/scPolASeq_dengue/results/day1/apa/site_catalog.bed
+  pas_reference: /scratch/users/fabro/scPolASeq_dengue/results/day1/pas_reference/pas_reference.tsv
+  pdui_matrix: /scratch/users/fabro/scPolASeq_dengue/results/day1/apa_calls/pdui_usage_matrix.tsv
+  apa_events: /scratch/users/fabro/scPolASeq_dengue/results/day1/apa_calls/apa_events.tsv
 
 sierra:
-  quant_dir: /path/to/sierra_quant/cluster
+  quant_dir: /scratch/users/fabro/scPolASeq_dengue/results/day1/sierra_quant/cluster
 
 scapture:
-  site_catalog: /path/to/scapture.site_catalog.tsv
-  umi_matrix: /path/to/KeepCell.UMIs.tsv
+  # The current config schema accepts one scapture catalog. The day1 result has
+  # separate DF and DHF catalogs; use one here until multi-catalog loading lands.
+  site_catalog: /scratch/users/fabro/scPolASeq_dengue/results/day1/scapture/DF.scapture.site_catalog.tsv
+  umi_matrix: /scratch/users/fabro/scPolASeq_dengue/results/day1/scapture/DF.KeepCell.UMIs.tsv.gz
 
 cell_labels:
-  apa_ready_groups: /path/to/apa_ready_groups.tsv
+  apa_ready_groups: /scratch/users/fabro/scPolASeq_dengue/results/day1/labels/cell_annotations.tsv
+  group_map: /scratch/users/fabro/scPolASeq_dengue/results/day1/labels/group_map.tsv
+  group_summary: /scratch/users/fabro/scPolASeq_dengue/results/day1/labels/group_summary.tsv
 
 bigwig_tracks:
-  DF:
-    all: /path/to/DF.bw
-    CD14_Monocyte: /path/to/DF.CD14_Monocyte.bw
-  DHF:
-    all: /path/to/DHF.bw
-    CD14_Monocyte: /path/to/DHF.CD14_Monocyte.bw
+  # day1 currently provides strand-specific cluster tracks, not a single global
+  # DF/DHF bigWig. CLI plotting uses "all" today, so these representative
+  # forward tracks are placeholders for smoke testing only.
+  DF.cluster_1:
+    all: /scratch/users/fabro/scPolASeq_dengue/results/day1/coverage/cluster/DF.cluster_1.fwd.bw
+    fwd: /scratch/users/fabro/scPolASeq_dengue/results/day1/coverage/cluster/DF.cluster_1.fwd.bw
+    rev: /scratch/users/fabro/scPolASeq_dengue/results/day1/coverage/cluster/DF.cluster_1.rev.bw
+  DHF.cluster_1:
+    all: /scratch/users/fabro/scPolASeq_dengue/results/day1/coverage/cluster/DHF.cluster_1.fwd.bw
+    fwd: /scratch/users/fabro/scPolASeq_dengue/results/day1/coverage/cluster/DHF.cluster_1.fwd.bw
+    rev: /scratch/users/fabro/scPolASeq_dengue/results/day1/coverage/cluster/DHF.cluster_1.rev.bw
 
 analysis:
-  group_a: DF
-  group_b: DHF
+  group_a: DF.cluster_1
+  group_b: DHF.cluster_1
   fdr_cutoff: 0.05
   delta_pdui_cutoff: 0.15
   pas_match_window: 25
