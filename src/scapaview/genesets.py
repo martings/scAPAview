@@ -108,49 +108,66 @@ def filter_gene_sets_to_annotation(
     return filtered
 
 
+def _gene_symbol_to_ids(gene_table: pd.DataFrame | None) -> dict[str, set[str]]:
+    """Build a gene-symbol to base-Ensembl-id map from annotation."""
+    if gene_table is None or gene_table.empty or "gene_name" not in gene_table.columns:
+        return {}
+    table = gene_table.copy()
+    if "gene_id_base" not in table.columns and "gene_id" in table.columns:
+        table["gene_id_base"] = table["gene_id"].astype(str).str.split(".", n=1).str[0]
+    mapping: dict[str, set[str]] = {}
+    for _, row in table.dropna(subset=["gene_name", "gene_id_base"]).iterrows():
+        mapping.setdefault(str(row["gene_name"]), set()).add(str(row["gene_id_base"]))
+    return mapping
+
+
+def _gene_targets(genes: list[str], symbol_map: dict[str, set[str]]) -> set[str]:
+    targets = set(genes)
+    for gene in genes:
+        targets.update(symbol_map.get(gene, set()))
+    targets.update(g.split(".", 1)[0] for g in list(targets))
+    return targets
+
+
 def summarize_gene_set_apa_burden(
     gene_sets: dict[str, list[str]],
     pas_sites: pd.DataFrame,
     apa_events: pd.DataFrame,
+    gene_table: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Summarize APA burden per gene set.
+    """Summarize APA burden per gene set using gene symbols or Ensembl ids."""
+    pas = pas_sites.copy() if pas_sites is not None else pd.DataFrame()
+    apa = apa_events.copy() if apa_events is not None else pd.DataFrame()
+    for df in (pas, apa):
+        if not df.empty and "gene_id_base" not in df.columns and "gene_id" in df.columns:
+            df["gene_id_base"] = df["gene_id"].astype(str).str.split(".", n=1).str[0]
 
-    Returns a DataFrame with columns:
-    gene_set, n_genes, n_genes_with_pas, n_pas_sites,
-    n_apa_events, n_significant_apa_events
-    """
-    gene_col_pas = "gene_id" if "gene_id" in pas_sites.columns else "GeneID"
-    gene_col_apa = "gene_id" if "gene_id" in apa_events.columns else "GeneID"
+    symbol_map = _gene_symbol_to_ids(gene_table)
+    pas_gene_col = "gene_id_base" if "gene_id_base" in pas.columns else "gene_id" if "gene_id" in pas.columns else None
+    apa_gene_col = "gene_id_base" if "gene_id_base" in apa.columns else "gene_id" if "gene_id" in apa.columns else None
 
-    sig_col = None
-    for c in ("is_fdr_and_delta", "is_fdr_significant", "adj_p_value"):
-        if c in apa_events.columns:
-            sig_col = c
-            break
-
+    sig_col = next((c for c in ("is_fdr_and_delta", "is_fdr_significant", "adj_p_value") if c in apa.columns), None)
     rows = []
     for set_name, genes in gene_sets.items():
-        genes_set = set(genes)
-        pas_sub = pas_sites[pas_sites[gene_col_pas].isin(genes_set)]
-        apa_sub = apa_events[apa_events[gene_col_apa].isin(genes_set)]
-        n_genes_with_pas = pas_sub[gene_col_pas].nunique()
-
+        targets = _gene_targets(genes, symbol_map)
+        pas_sub = pas[pas[pas_gene_col].astype(str).isin(targets)] if pas_gene_col else pd.DataFrame()
+        apa_sub = apa[apa[apa_gene_col].astype(str).isin(targets)] if apa_gene_col else pd.DataFrame()
         if sig_col == "adj_p_value":
-            n_sig = (apa_sub[sig_col] < 0.05).sum()
+            n_sig = int((pd.to_numeric(apa_sub[sig_col], errors="coerce") < 0.05).sum())
         elif sig_col is not None:
-            n_sig = apa_sub[sig_col].sum()
+            n_sig = int(apa_sub[sig_col].fillna(False).astype(bool).sum())
         else:
             n_sig = 0
-
         rows.append(
             {
                 "gene_set": set_name,
                 "n_genes": len(genes),
-                "n_genes_with_pas": n_genes_with_pas,
+                "n_gene_ids_matched": len(targets - set(genes)),
+                "n_genes_with_pas": int(pas_sub[pas_gene_col].nunique()) if pas_gene_col and not pas_sub.empty else 0,
                 "n_pas_sites": len(pas_sub),
                 "n_apa_events": len(apa_sub),
-                "n_significant_apa_events": int(n_sig),
+                "n_significant_apa_events": n_sig,
+                "n_fdr_and_delta_events": int(apa_sub.get("is_fdr_and_delta", pd.Series(dtype=bool)).fillna(False).astype(bool).sum()) if not apa_sub.empty else 0,
             }
         )
-
     return pd.DataFrame(rows)

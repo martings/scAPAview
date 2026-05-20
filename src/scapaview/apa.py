@@ -192,6 +192,12 @@ def build_unified_pas_table(
         return pd.DataFrame()
 
     all_sites = pd.concat(frames, ignore_index=True, sort=False)
+    if len(frames) == 1:
+        unified = summarize_pas_support(all_sites)
+        unified = rank_pas_within_gene(unified)
+        logger.info("Built unified PAS table with %d unmerged single-source sites", len(unified))
+        return unified
+
     merged_rows: list[dict[str, object]] = []
     group_cols = ["gene_id_base", "chrom", "strand"]
     for _, group in all_sites.groupby(group_cols, observed=True, dropna=False):

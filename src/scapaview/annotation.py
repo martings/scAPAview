@@ -210,7 +210,11 @@ def distance_to_nearest_splice_site(
     splice_sites: pd.DataFrame,
     window: int = 100,
 ) -> pd.DataFrame:
-    """Compute distance from each PAS site to the nearest splice site."""
+    """Compute distance from each PAS site to the nearest splice site.
+
+    Uses sorted per chromosome/strand splice positions, so it scales to full
+    scPolASeq PAS catalogs without all-vs-all distance scans.
+    """
     pas = pas_sites.copy()
     pas["nearest_splice_site_type"] = None
     pas["nearest_splice_site_distance"] = np.nan
@@ -223,21 +227,39 @@ def distance_to_nearest_splice_site(
     strand_col_pas = "strand" if "strand" in pas.columns else "Strand"
     chrom_col_ss = "chrom" if "chrom" in splice_sites.columns else "Chromosome"
     strand_col_ss = "strand" if "strand" in splice_sites.columns else "Strand"
-    grouped = {(c, s): g for (c, s), g in splice_sites.groupby([chrom_col_ss, strand_col_ss], observed=True)}
 
-    for idx, row in pas.iterrows():
-        same = grouped.get((row[chrom_col_pas], row[strand_col_pas]))
-        if same is None or same.empty:
+    grouped: dict[tuple[object, object], tuple[np.ndarray, np.ndarray]] = {}
+    for key, grp in splice_sites.groupby([chrom_col_ss, strand_col_ss], observed=True):
+        ordered = grp.sort_values("position")
+        grouped[key] = (ordered["position"].to_numpy(dtype=int), ordered["splice_site_type"].astype(str).to_numpy())
+
+    for key, idxs in pas.groupby([chrom_col_pas, strand_col_pas], observed=True).groups.items():
+        if key not in grouped:
             continue
-        pos = int(row[start_col_pas])
-        dists = np.abs(same["position"].to_numpy() - pos)
-        min_i = int(np.argmin(dists))
-        min_dist = int(dists[min_i])
-        pas.at[idx, "nearest_splice_site_distance"] = min_dist
-        pas.at[idx, "nearest_splice_site_type"] = same.iloc[min_i]["splice_site_type"]
-        pas.at[idx, "is_splice_proximal"] = min_dist <= window
-    return pas
+        ss_pos, ss_type = grouped[key]
+        if len(ss_pos) == 0:
+            continue
+        positions = pas.loc[idxs, start_col_pas].to_numpy(dtype=int)
+        insert = np.searchsorted(ss_pos, positions)
+        best_dist = np.full(len(positions), np.iinfo(np.int32).max, dtype=int)
+        best_type = np.array([None] * len(positions), dtype=object)
 
+        right_mask = insert < len(ss_pos)
+        right_dist = np.abs(ss_pos[np.clip(insert, 0, len(ss_pos) - 1)] - positions)
+        best_dist[right_mask] = right_dist[right_mask]
+        best_type[right_mask] = ss_type[np.clip(insert[right_mask], 0, len(ss_pos) - 1)]
+
+        left_insert = insert - 1
+        left_mask = left_insert >= 0
+        left_dist = np.abs(ss_pos[np.clip(left_insert, 0, len(ss_pos) - 1)] - positions)
+        take_left = left_mask & (left_dist < best_dist)
+        best_dist[take_left] = left_dist[take_left]
+        best_type[take_left] = ss_type[left_insert[take_left]]
+
+        pas.loc[idxs, "nearest_splice_site_distance"] = best_dist.astype(float)
+        pas.loc[idxs, "nearest_splice_site_type"] = best_type
+        pas.loc[idxs, "is_splice_proximal"] = best_dist <= window
+    return pas
 
 def compute_relative_position(site_pos: int, region_start: int, region_end: int, strand: str) -> float:
     """Compute relative position [0, 1] of a site within a region, strand-aware."""
