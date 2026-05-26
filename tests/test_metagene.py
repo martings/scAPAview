@@ -105,3 +105,74 @@ def test_plot_metagene_3utr_returns_fig_ax(simple_regions, monkeypatch):
 
     assert isinstance(fig, plt.Figure)
     plt.close(fig)
+
+
+def test_plot_metagene_3utr_uses_explicit_labels(simple_regions, monkeypatch):
+    import matplotlib
+    matplotlib.use("Agg")
+
+    calls = []
+
+    def mock_aggregate(paths, regions, n_bins=100):
+        calls.append(paths)
+        return np.zeros(n_bins) if len(calls) == 1 else np.ones(n_bins)
+
+    monkeypatch.setattr("scapaview.coverage.aggregate_metagene_coverage", mock_aggregate)
+
+    fig, ax = plot_metagene_3utr(
+        bw_paths_a=["df.bw"],
+        bw_paths_b=["dhf.bw"],
+        regions=simple_regions,
+        n_bins=20,
+        show=False,
+        label_a="DF",
+        label_b="DHF",
+        comparison_label="DF vs DHF",
+        celltype="CD14_Monocyte",
+        gene_set_name="PAF1_NS5_axis",
+        plot_delta=True,
+    )
+
+    legend_labels = ax.get_legend_handles_labels()[1]
+    assert "DF" in legend_labels
+    assert "DHF" in legend_labels
+    assert "Group A" not in legend_labels
+    assert "Group B" not in legend_labels
+    assert "DF vs DHF" in ax.get_title()
+    assert "CD14_Monocyte" in ax.get_title()
+    assert "PAF1_NS5_axis" in ax.get_title()
+
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+
+
+def test_plot_metagene_3utr_delta_panel(simple_regions, monkeypatch):
+    import matplotlib
+    matplotlib.use("Agg")
+
+    calls = []
+
+    def mock_aggregate(paths, regions, n_bins=100):
+        calls.append(paths)
+        return np.zeros(n_bins) if len(calls) == 1 else np.ones(n_bins)
+
+    monkeypatch.setattr("scapaview.coverage.aggregate_metagene_coverage", mock_aggregate)
+
+    fig, ax = plot_metagene_3utr(
+        bw_paths_a=["df.bw"],
+        bw_paths_b=["dhf.bw"],
+        regions=simple_regions,
+        n_bins=20,
+        show=False,
+        label_a="DF",
+        label_b="DHF",
+        plot_delta=True,
+    )
+
+    assert len(fig.axes) == 2
+    delta_ax = fig.axes[1]
+    assert delta_ax.get_ylabel() == "DHF - DF"
+    assert "DHF - DF coverage" in delta_ax.get_legend_handles_labels()[1]
+
+    import matplotlib.pyplot as plt
+    plt.close(fig)

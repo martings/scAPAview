@@ -78,7 +78,7 @@ def _plot_metagene_coverage(
     x: np.ndarray,
     label: str,
     color: str,
-) -> None:
+) -> np.ndarray:
     """Aggregate coverage and draw a line/fill metagene trace."""
     from .coverage import aggregate_metagene_coverage
 
@@ -86,9 +86,11 @@ def _plot_metagene_coverage(
         cov = aggregate_metagene_coverage([p for p in bw_paths if p], regions, n_bins=n_bins)
         draw_coverage(ax, x, cov, label=label, color=color, alpha=0.25)
         ax.plot(x, cov, color=color, linewidth=1.4)
+        return cov
     except Exception as exc:
         logger.warning("Could not compute metagene coverage for '%s': %s", label, exc)
         ax.text(0.5, 0.5, f"coverage unavailable: {label}", transform=ax.transAxes, ha="center", va="center")
+        return np.zeros(n_bins)
 
 
 def plot_metagene_3utr(
@@ -100,14 +102,32 @@ def plot_metagene_3utr(
     n_bins: int = 100,
     output: str | Path | None = None,
     show: bool = True,
+    label_a: str = "Group A",
+    label_b: str = "Group B",
+    comparison_label: str | None = None,
+    celltype: str | None = None,
+    gene_set_name: str | None = None,
+    plot_delta: bool = True,
 ) -> tuple[plt.Figure, plt.Axes]:
-    """Plot terminal-exon/3' region metagene coverage with optional PAS density."""
+    """Plot terminal-exon/3' region metagene coverage with optional PAS density and delta."""
     x = np.linspace(0, 1, n_bins)
-    fig, ax = plt.subplots(figsize=(8, 4))
+    has_delta = bool(plot_delta and bw_paths_b)
+    if has_delta:
+        fig, (ax, ax_delta) = plt.subplots(
+            2,
+            1,
+            figsize=(8, 5.4),
+            sharex=True,
+            gridspec_kw={"height_ratios": [3, 1]},
+        )
+    else:
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax_delta = None
 
-    _plot_metagene_coverage(ax, bw_paths_a or [], regions, n_bins, x, label="Group A", color="steelblue")
+    cov_a = _plot_metagene_coverage(ax, bw_paths_a or [], regions, n_bins, x, label=label_a, color="steelblue")
+    cov_b = None
     if bw_paths_b:
-        _plot_metagene_coverage(ax, bw_paths_b, regions, n_bins, x, label="Group B", color="tomato")
+        cov_b = _plot_metagene_coverage(ax, bw_paths_b, regions, n_bins, x, label=label_b, color="tomato")
 
     if pas_sites is not None and not pas_sites.empty:
         density = compute_pas_density_metagene(pas_sites, regions, n_bins=n_bins)
@@ -115,11 +135,28 @@ def plot_metagene_3utr(
         ax2.plot(x, density, color="black", linestyle="--", linewidth=1, alpha=0.7, label="PAS density")
         ax2.set_ylabel("PAS / region", fontsize=9)
 
-    ax.set_xlabel("Relative position (5' to 3')", fontsize=10)
+    title_parts = ["Metagene: terminal exon / 3' region"]
+    for part in (comparison_label, celltype, gene_set_name):
+        if part:
+            title_parts.append(part)
+    ax.set_title(" | ".join(title_parts), fontsize=11)
     ax.set_ylabel("Mean coverage", fontsize=10)
-    ax.set_title("Metagene: terminal exon / 3' region", fontsize=11)
     ax.legend(fontsize=8, loc="upper left")
     ax.set_xlim(0, 1)
+
+    if ax_delta is not None and cov_b is not None:
+        delta = cov_b - cov_a
+        delta_label = f"{label_b} - {label_a} coverage"
+        ax_delta.axhline(0, color="0.25", linewidth=0.8)
+        ax_delta.fill_between(x, delta, 0, where=delta >= 0, color="tomato", alpha=0.35, interpolate=True)
+        ax_delta.fill_between(x, delta, 0, where=delta < 0, color="steelblue", alpha=0.35, interpolate=True)
+        ax_delta.plot(x, delta, color="0.2", linewidth=1.0, label=delta_label)
+        ax_delta.set_ylabel(f"{label_b} - {label_a}", fontsize=9)
+        ax_delta.legend(fontsize=8, loc="upper left")
+        ax_delta.set_xlabel("Relative position (5' to 3')", fontsize=10)
+    else:
+        ax.set_xlabel("Relative position (5' to 3')", fontsize=10)
+
     plt.tight_layout()
     if output:
         _save_png_pdf(fig, output)

@@ -71,6 +71,9 @@ def plot_gene_apa_tracks(
     flank: int = 1000,
     output: str | Path | None = None,
     show: bool = True,
+    shared_coverage_y: bool = True,
+    coverage_ymax: float | None = None,
+    coverage_ylim_quantile: float | None = None,
 ) -> tuple[plt.Figure, list[plt.Axes]]:
     """Plot coverage, gene model, PAS sites, and delta-PDUI events for one gene."""
     gene_row = _find_gene(gtf, gene_name)
@@ -107,20 +110,57 @@ def plot_gene_apa_tracks(
     axes = list(np.atleast_1d(axes))
     x_range = np.arange(g_start, g_end)
 
-    panel_idx = 0
+    coverage_records: list[dict[str, object]] = []
+    coverage_arrays: list[np.ndarray] = []
     if tracks:
         for label, track in tracks.items():
-            ax = axes[panel_idx]
             bw_path = select_strand_bigwig(track, strand=strand)
             try:
                 cov = extract_bigwig_interval(bw_path, chrom, g_start, g_end)
-                draw_coverage(ax, x_range[: len(cov)], cov, label=label)
-                ax.legend(loc="upper right", fontsize=8)
+                coverage_records.append({"label": label, "coverage": cov, "error": None})
+                if len(cov):
+                    coverage_arrays.append(cov)
             except Exception as exc:
                 logger.warning("Could not load bigWig for %s: %s", label, exc)
+                coverage_records.append({"label": label, "coverage": None, "error": exc})
+
+    if shared_coverage_y and coverage_arrays:
+        if coverage_ymax is None:
+            if coverage_ylim_quantile is not None:
+                coverage_ymax = max(float(np.nanquantile(cov, coverage_ylim_quantile)) for cov in coverage_arrays)
+            else:
+                coverage_ymax = max(float(np.nanmax(cov)) for cov in coverage_arrays)
+        if coverage_ymax <= 0:
+            coverage_ymax = 1.0
+
+    panel_idx = 0
+    coverage_axes: list[plt.Axes] = []
+    if coverage_records:
+        for record in coverage_records:
+            ax = axes[panel_idx]
+            coverage_axes.append(ax)
+            label = str(record["label"])
+            cov = record["coverage"]
+            if cov is not None:
+                cov_arr = np.asarray(cov, dtype=float)
+                draw_coverage(ax, x_range[: len(cov_arr)], cov_arr, label=label)
+                ax.legend(loc="upper right", fontsize=8)
+            else:
                 ax.text(0.5, 0.5, f"coverage unavailable: {label}", transform=ax.transAxes, ha="center", va="center")
+            if shared_coverage_y and coverage_ymax is not None:
+                ax.set_ylim(0, coverage_ymax * 1.05)
             ax.set_ylabel(label, fontsize=8)
             panel_idx += 1
+        if shared_coverage_y and coverage_ymax is not None:
+            coverage_axes[0].text(
+                0.01,
+                0.92,
+                f"shared coverage y-axis; ymax = {coverage_ymax:.3g}",
+                transform=coverage_axes[0].transAxes,
+                fontsize=8,
+                color="0.35",
+                va="top",
+            )
     else:
         axes[panel_idx].text(0.5, 0.5, "no bigWig tracks", transform=axes[panel_idx].transAxes, ha="center", va="center", color="grey")
         panel_idx += 1

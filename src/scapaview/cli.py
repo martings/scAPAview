@@ -266,7 +266,19 @@ def plot_metagene_cmd(config_path: str, gene_set: str, region: str) -> None:
         terminal = load_terminal_exons(config["reference"]["terminal_exons"])
         regions = terminal_regions_for_genes(terminal, genes, gene_table)
         out = output_dir / "plots" / f"metagene_{gene_set}_3utr.png"
-        plot_metagene_3utr(bw_a, bw_b, regions, pas_sites=pas, output=out, show=False)
+        plot_metagene_3utr(
+            bw_a,
+            bw_b,
+            regions,
+            pas_sites=pas,
+            output=out,
+            show=False,
+            label_a=ga or "Group A",
+            label_b=gb or "Group B",
+            comparison_label=f"{ga} vs {gb}" if ga and gb else None,
+            gene_set_name=gene_set,
+            plot_delta=True,
+        )
     else:
         name_col = "gene_name" if "gene_name" in gene_table.columns else "gene_id"
         regions = gene_table[gene_table[name_col].isin(genes)]
@@ -333,11 +345,75 @@ def demo_dengue_cmd(config_path: str) -> None:
         genes = DEFAULT_GENE_SETS[gene_set]
         regions = terminal_regions_for_genes(terminal, genes, gene_table)
         out = output_dir / "plots" / f"metagene_{gene_set}_3utr.png"
-        plot_metagene_3utr(bw_a, bw_b, regions, pas_sites=pas, output=out, show=False)
+        plot_metagene_3utr(
+            bw_a,
+            bw_b,
+            regions,
+            pas_sites=pas,
+            output=out,
+            show=False,
+            label_a=ga or "Group A",
+            label_b=gb or "Group B",
+            comparison_label=f"{ga} vs {gb}" if ga and gb else None,
+            gene_set_name=gene_set,
+            plot_delta=True,
+        )
         click.echo(f"Metagene plot saved to {out} ({len(regions):,} regions)")
 
     _write_figure_index(output_dir)
     click.echo(f"Dengue demo complete. See {output_dir / 'plots'}")
+
+
+@cli.command("plot-transcript-diagram")
+@click.argument("config_path")
+@click.option("--gene", required=True, help="Gene symbol or gene_id to plot.")
+@click.option("--transcript-id", default="auto", show_default=True, help="Transcript id or 'auto'.")
+@click.option("--flank", default=500, show_default=True, help="Window size around auditable landmarks.")
+@click.option("--collapsed/--full-genomic", default=False, show_default=True, help="Render a shortened transcript-view diagram with internal exons/introns collapsed.")
+def plot_transcript_diagram_cmd(config_path: str, gene: str, transcript_id: str, flank: int, collapsed: bool) -> None:
+    """Plot a transcript landmark QC diagram for one gene/transcript."""
+    from .io import load_config
+    from .report import write_table
+    from .transcript_diagram import (
+        build_transcript_landmarks,
+        plot_transcript_landmark_diagram,
+        qc_landmark_consistency,
+    )
+
+    config = load_config(config_path)
+    output_dir = _output_dir(config)
+    figures_dir = output_dir / "figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    gtf, _ = _load_gtf_gene_table(config)
+    requested_tx = None if transcript_id == "auto" else transcript_id
+    landmarks = build_transcript_landmarks(gene, gtf, transcript_id=requested_tx)
+    selected_tx = landmarks["transcript_id"].iloc[0] if not landmarks.empty else requested_tx
+    pas = _read_pas_for_plot(output_dir)
+    apa = _read_classified_events(config, output_dir)
+    suffix = "_collapsed" if collapsed else ""
+    figure_path = figures_dir / f"transcript_diagram_{gene}{suffix}.png"
+    plot_transcript_landmark_diagram(
+        gene_name=gene,
+        gtf=gtf,
+        landmarks=landmarks,
+        pas_sites=pas,
+        transcript_id=selected_tx,
+        apa_events=apa,
+        flank=flank,
+        output=figure_path,
+        show=False,
+        collapsed=collapsed,
+    )
+    qc = qc_landmark_consistency(
+        gtf=gtf,
+        landmarks=landmarks,
+        pas_sites=pas,
+        gene_name=gene,
+        transcript_id=selected_tx,
+    )
+    qc_path = write_table(qc, output_dir / "tables", f"transcript_diagram_{gene}_landmark_qc.tsv")
+    click.echo(f"Transcript diagram saved to {figure_path}")
+    click.echo(f"Landmark QC table written to {qc_path}")
 
 
 def _write_figure_index(output_dir: Path) -> None:
